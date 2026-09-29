@@ -249,9 +249,12 @@ struct SchedulePredictor {
             return Int(blend(learned: Double(m), typical: typical, range: 17 * 60...24 * 60, days: summary.daysOfData))
         } ?? ageBedtimeMinute
         guard let minute else { return nil }
-        let today = calendar.startOfDay(for: now).addingTimeInterval(TimeInterval(minute * 60))
-        // After tonight's bedtime (or deep in the night), look at tomorrow's.
-        return today < now.addingTimeInterval(-2 * 3600) ? today.addingTimeInterval(86_400) : today
+        // Tonight's bedtime, until the baby has actually gone down for the night.
+        let tonight = calendar.startOfDay(for: now).addingTimeInterval(TimeInterval(minute * 60))
+        let wentToBed = entries.contains {
+            $0.kind == .sleep && $0.timestamp >= tonight.addingTimeInterval(-90 * 60) && calendar.isDateInToday($0.timestamp)
+        }
+        return wentToBed ? tonight.addingTimeInterval(86_400) : tonight
     }
 
     // MARK: Planning
@@ -348,7 +351,7 @@ struct SchedulePredictor {
             }
         }
         let isAsleep = entries.contains(where: \.isOngoingSleep)
-        if let bedtimeDate, !isAsleep, bedtimeDate > now.addingTimeInterval(-2 * 3600), bedtimeDate < end {
+        if let bedtimeDate, !isAsleep, bedtimeDate < end {
             let usual = bedtimeDate.formatted(date: .omitted, time: .shortened)
             let reason = summary.bedtimeMinute != nil ? "Usual bedtime" : "Typical bedtime for this age"
             // Past the usual bedtime and still awake: it's due now.

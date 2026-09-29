@@ -61,6 +61,9 @@ struct TodayView: View {
                             DevelopmentRow(age: age)
                                 .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
+
+                        GrowthRow(baby: baby)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
                 .padding(.horizontal)
@@ -522,7 +525,7 @@ enum AppTab: Hashable {
 /// Shared tab selection, so screens can jump to another tab (e.g. "See All" on Today).
 @Observable
 final class TabRouter {
-    var selected: AppTab = .today
+    var selected: AppTab = ScreenshotData.requestedTab ?? .today
 
     func open(_ tab: AppTab) {
         withAnimation { selected = tab }

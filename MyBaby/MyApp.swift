@@ -1,3 +1,4 @@
+import AppIntents
 import CloudKit
 import CoreData
 import SwiftUI
@@ -11,6 +12,7 @@ import UserNotifications
 
     init() {
         LegacyImport.runIfNeeded(PersistenceController.shared)
+        ScreenshotData.seedIfRequested(PersistenceController.shared)
     }
 
     var body: some Scene {
@@ -21,6 +23,8 @@ import UserNotifications
         .onChange(of: scenePhase) { _, phase in
             // Core Data doesn't autosave; make sure nothing is left unsaved when leaving.
             if phase != .active { persistence.save() }
+            // Refresh baby names Siri listens for ("Mia woke up").
+            if phase == .active { BabyShortcuts.updateAppShortcutParameters() }
         }
     }
 }

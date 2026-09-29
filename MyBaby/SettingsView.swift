@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreData
 import UserNotifications
+import WidgetKit
 
 struct SettingsView: View {
     @ObservedObject var baby: Baby
@@ -9,11 +10,15 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @FetchRequest private var entries: FetchedResults<BabyEntry>
     @FetchRequest private var feeds: FetchedResults<BabyEntry>
+    @FetchRequest private var measurements: FetchedResults<GrowthMeasurement>
+    @FetchRequest(fetchRequest: Baby.fetchAll()) private var babies: FetchedResults<Baby>
+    @AppStorage(SelectedBaby.storageKey, store: SelectedBaby.defaults) private var selectedBabyID = ""
 
     init(baby: Baby) {
         self.baby = baby
         _entries = FetchRequest(fetchRequest: BabyEntry.fetch(for: baby))
         _feeds = FetchRequest(fetchRequest: BabyEntry.fetch(for: baby, kinds: [.feed], limit: 1))
+        _measurements = FetchRequest(fetchRequest: GrowthMeasurement.fetch(for: baby))
     }
 
     private var birthdayInterval: Double { baby.birthdayInterval }
@@ -24,6 +29,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.hasCompletedOnboarding) private var hasCompletedOnboarding = true
 
     @State private var isConfirmingDelete = false
+    @State private var isConfirmingDeleteBaby = false
     @State private var notificationsDenied = false
 
     private var name: Binding<String> {
@@ -122,14 +128,19 @@ struct SettingsView: View {
 
                 Section {
                     LabeledContent("Logged Entries", value: "\(entries.count)")
-                    Button("Delete All Entries", role: .destructive) {
+                    LabeledContent("Growth Measurements", value: "\(measurements.count)")
+                    Button("Delete Logged Data", systemImage: "trash", role: .destructive) {
                         isConfirmingDelete = true
                     }
-                    .disabled(entries.isEmpty)
+                    .disabled(entries.isEmpty && measurements.isEmpty)
+                    Button(isShared ? "Remove \(baby.displayName)" : "Delete \(baby.displayName)",
+                           systemImage: "person.crop.circle.badge.minus", role: .destructive) {
+                        isConfirmingDeleteBaby = true
+                    }
                 } header: {
                     Text("Data")
                 } footer: {
-                    Text("Entries sync privately through your iCloud account to your other devices. To turn syncing off, go to Settings > [your name] > iCloud.")
+                    Text(dataFooter)
                 }
 
                 Section {
@@ -155,13 +166,28 @@ struct SettingsView: View {
             .themedBackground()
             .funNavigationTitle("Settings")
             .confirmationDialog(
-                "Delete all \(entries.count) of \(baby.displayName)'s entries? This can't be undone.",
+                deleteDataMessage,
                 isPresented: $isConfirmingDelete,
                 titleVisibility: .visible
             ) {
-                Button("Delete All Entries", role: .destructive) {
+                Button("Delete Logged Data", role: .destructive) {
+                    // Stop any running timers first so their Live Activities don't linger.
+                    for entry in entries where entry.isInProgress {
+                        BabyActivityController.end(entryID: entry.entryID)
+                    }
                     entries.forEach(context.delete)
+                    measurements.forEach(context.delete)
                     save()
+                    WidgetCenter.shared.reloadAllTimelines()
+                }
+            }
+            .confirmationDialog(
+                deleteBabyMessage,
+                isPresented: $isConfirmingDeleteBaby,
+                titleVisibility: .visible
+            ) {
+                Button(isShared ? "Remove \(baby.displayName)" : "Delete \(baby.displayName)", role: .destructive) {
+                    Task { await deleteBaby() }
                 }
             }
             .onChange(of: remindersEnabled) { _, enabled in
@@ -178,6 +204,49 @@ struct SettingsView: View {
                 Task { await FeedReminderScheduler.reschedule(lastFeed: feeds.first?.timestamp, babyName: baby.name ?? "") }
             }
         }
+    }
+}
+
+extension SettingsView {
+    /// True when someone else shared this baby with you.
+    private var isShared: Bool { PersistenceController.shared.isFromSomeoneElse(baby) }
+
+    private var dataFooter: String {
+        if isShared {
+            return String(localized: "Removing \(baby.displayName) takes them off your devices only. The person who shared \(baby.displayName) keeps the log.")
+        }
+        return String(localized: "Your data syncs privately through your iCloud account. Deleting \(baby.displayName) removes their profile and everything logged, on all your devices and for anyone you share with.")
+    }
+
+    private var deleteDataMessage: String {
+        let isOnShare = isShared || PersistenceController.shared.existingShare(for: baby) != nil
+        return isOnShare
+            ? String(localized: "Delete all of \(baby.displayName)'s feeds, sleep, diapers, health notes and growth measurements for everyone on the share? \(baby.displayName)'s profile stays. This can't be undone.")
+            : String(localized: "Delete all of \(baby.displayName)'s feeds, sleep, diapers, health notes and growth measurements? \(baby.displayName)'s profile stays. This can't be undone.")
+    }
+
+    private var deleteBabyMessage: String {
+        if isShared {
+            return String(localized: "Remove \(baby.displayName) from your devices? You'll need a new invitation to see their log again.")
+        }
+        let isSharedWithOthers = PersistenceController.shared.existingShare(for: baby) != nil
+        return isSharedWithOthers
+            ? String(localized: "Delete \(baby.displayName) and everything logged for them? Everyone you share with will lose access too. This can't be undone.")
+            : String(localized: "Delete \(baby.displayName) and everything logged for them? This can't be undone.")
+    }
+
+    private func deleteBaby() async {
+        // Switch to another baby first so no screen is left showing a deleted one.
+        let next = babies.first { $0.objectID != baby.objectID }
+        for entry in entries where entry.isInProgress {
+            BabyActivityController.end(entryID: entry.entryID)
+        }
+        ScheduleReminders.removeAll(for: baby)
+        let deleted = baby
+        withAnimation { selectedBabyID = next?.babyID?.uuidString ?? "" }
+        await PersistenceController.shared.delete(deleted)
+        WidgetCenter.shared.reloadAllTimelines()
+        // With no babies left, the welcome screen appears to add one.
     }
 }
 

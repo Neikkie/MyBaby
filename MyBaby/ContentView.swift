@@ -459,6 +459,12 @@ enum PreviewStore {
         _ = BabyEntry(context: context, baby: baby, kind: .diaper, timestamp: .now.addingTimeInterval(-1 * hour), diaperType: .both)
         _ = BabyEntry(context: context, baby: baby, kind: .sleep, timestamp: .now.addingTimeInterval(-3 * hour), endTime: .now.addingTimeInterval(-1.5 * hour))
         _ = BabyEntry(context: context, baby: baby, kind: .health, timestamp: .now.addingTimeInterval(-2 * hour), symptom: .fever, severity: .mild, temperatureC: 38.2)
+        for (weeks, kg, cm, head) in [(0.0, 3.4, 50.5, 34.5), (2, 3.9, 52.0, 35.8), (6, 4.9, 55.5, 37.6), (9, 5.5, 57.8, 38.5)] {
+            let measurement = GrowthMeasurement(context: context, baby: baby, date: baby.birthday!.addingTimeInterval(weeks * 7 * 86_400))
+            measurement.weightKg = kg
+            measurement.lengthCm = cm
+            measurement.headCm = head
+        }
         persistence.save()
         SelectedBaby.id = baby.babyID
         return persistence

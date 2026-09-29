@@ -20,6 +20,9 @@ struct QuickLogSheet: View {
     @State private var bottleType: FeedType?
     @State private var amount: Double = 0
     @State private var sleepLocation: SleepLocation?
+    @State private var isLoggingPump = false
+    /// Pumping sessions when the pump form opened, to find the one just saved.
+    @State private var pumpsBefore: Set<NSManagedObjectID> = []
 
     // Custom times: "now" unless the parent changes them.
     @State private var isChangingTime: Bool
@@ -38,6 +41,7 @@ struct QuickLogSheet: View {
     }
 
     private var entries: [BabyEntry] { Array(fetchedEntries) }
+    private var pumps: [BabyEntry] { fetchedEntries.filter { $0.kind == .pump } }
     private var age: BabyAge? { BabyAge(birthdayInterval: baby.birthdayInterval) }
 
     /// Only the feeding options that fit the baby's age.
@@ -93,6 +97,18 @@ struct QuickLogSheet: View {
         .animation(.spring(duration: 0.4, bounce: 0.3), value: bottleType)
         .animation(.spring(duration: 0.4, bounce: 0.25), value: isChangingTime)
         .animation(.spring(duration: 0.4, bounce: 0.25), value: hasEndTime)
+        .sheet(isPresented: $isLoggingPump, onDismiss: {
+            // Close the quick log too once a session was saved.
+            if let saved = pumps.first(where: { !pumpsBefore.contains($0.objectID) }) {
+                onLogged(LogConfirmation(kind: .pump, message: String(localized: "Pumping saved")) { [context] in
+                    context.delete(saved)
+                    try? context.save()
+                })
+                dismiss()
+            }
+        }) {
+            EntryFormView(kind: .pump, baby: baby)
+        }
         .onAppear {
             // Default to where the baby slept last time, if that's still age-appropriate.
             let last = entries.first { $0.kind == .sleep && $0.sleepLocation != nil }?.sleepLocation
@@ -209,6 +225,15 @@ struct QuickLogSheet: View {
                 SectionLabel("Food")
                 OptionButton(id: "solids", title: "Solids", symbol: "carrot.fill", kind: .feed, chosen: chosen) {
                     logFood(.solids)
+                }
+            }
+
+            if feedTypes.contains(.formula) {
+                // For the parent, not the baby: saved as a separate pumping entry.
+                SectionLabel("For you")
+                OptionButton(id: "pump", title: "Pumping Session", symbol: EntryKind.pump.symbol, kind: .pump, chosen: chosen) {
+                    pumpsBefore = Set(pumps.map(\.objectID))
+                    isLoggingPump = true
                 }
             }
         }

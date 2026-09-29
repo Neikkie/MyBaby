@@ -8,15 +8,18 @@ nonisolated enum EntryKind: String, CaseIterable, Identifiable, Codable {
     case sleep
     case diaper
     case health
+    /// A parent's pumping session (not a feed for the baby).
+    case pump
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .feed: "Feed"
-        case .sleep: "Sleep"
-        case .diaper: "Diaper"
-        case .health: "Health"
+        case .feed: String(localized: "Feed")
+        case .sleep: String(localized: "Sleep")
+        case .diaper: String(localized: "Diaper")
+        case .health: String(localized: "Health")
+        case .pump: String(localized: "Pumping")
         }
     }
 
@@ -26,6 +29,7 @@ nonisolated enum EntryKind: String, CaseIterable, Identifiable, Codable {
         case .sleep: "moon.zzz.fill"
         case .diaper: "sparkles"
         case .health: "cross.case.fill"
+        case .pump: "drop.circle.fill"
         }
     }
 
@@ -39,6 +43,7 @@ nonisolated enum EntryKind: String, CaseIterable, Identifiable, Codable {
         case .sleep: Color(red: 0.33, green: 0.32, blue: 0.82)   // #5452D1
         case .diaper: Color(red: 0.20, green: 0.53, blue: 0.22)  // #328737
         case .health: Color(red: 0.78, green: 0.16, blue: 0.16)  // #C62828
+        case .pump: Color(red: 0.48, green: 0.25, blue: 0.77)    // #7B3FC4 (6.3:1 with white)
         }
     }
 
@@ -52,6 +57,7 @@ nonisolated enum EntryKind: String, CaseIterable, Identifiable, Codable {
         case .sleep: Color(light: 0x5452D1, dark: 0x8583F0)
         case .diaper: Color(light: 0x328737, dark: 0x41AF50)
         case .health: Color(light: 0xC62828, dark: 0xFF6961)
+        case .pump: Color(light: 0x7B3FC4, dark: 0xC3A3FF)
         }
     }
 
@@ -63,6 +69,7 @@ nonisolated enum EntryKind: String, CaseIterable, Identifiable, Codable {
         case .sleep: Color(light: 0xE6E6FF, dark: 0x28275A)
         case .diaper: Color(light: 0xDFF5DD, dark: 0x1B3A21)
         case .health: Color(light: 0xFFE4E4, dark: 0x3D1C1C)
+        case .pump: Color(light: 0xEFE6FF, dark: 0x2E2148)
         }
     }
 }
@@ -391,12 +398,49 @@ nonisolated enum BabyDataModel {
             attribute("symptomRaw", .string),
             attribute("severityRaw", .string),
             attribute("temperatureC", .double),
+            attribute("leftML", .double),
+            attribute("rightML", .double),
             attribute("notes", .string, default: ""),
             owner,
         ]
 
+        // Growth measurements (weight, length, head size), shared with the baby.
+        let measurement = NSEntityDescription()
+        measurement.name = "GrowthMeasurement"
+        measurement.managedObjectClassName = NSStringFromClass(GrowthMeasurement.self)
+
+        let measurements = NSRelationshipDescription()
+        measurements.name = "measurements"
+        measurements.destinationEntity = measurement
+        measurements.minCount = 0
+        measurements.maxCount = 0 // to-many
+        measurements.deleteRule = .cascadeDeleteRule
+        measurements.isOptional = true
+
+        let measurementOwner = NSRelationshipDescription()
+        measurementOwner.name = "baby"
+        measurementOwner.destinationEntity = baby
+        measurementOwner.minCount = 0
+        measurementOwner.maxCount = 1
+        measurementOwner.deleteRule = .nullifyDeleteRule
+        measurementOwner.isOptional = true
+
+        measurements.inverseRelationship = measurementOwner
+        measurementOwner.inverseRelationship = measurements
+
+        measurement.properties = [
+            attribute("measurementID", .uuid),
+            attribute("date", .date),
+            attribute("weightKg", .double),
+            attribute("lengthCm", .double),
+            attribute("headCm", .double),
+            attribute("notes", .string, default: ""),
+            measurementOwner,
+        ]
+        baby.properties.append(measurements)
+
         let model = NSManagedObjectModel()
-        model.entities = [baby, entry, schedule]
+        model.entities = [baby, entry, schedule, measurement]
         return model
     }()
 }
@@ -438,6 +482,7 @@ nonisolated final class Baby: NSManagedObject, Identifiable {
     @NSManaged var createdAt: Date?
     @NSManaged var entries: NSSet?
     @NSManaged var scheduleItems: NSSet?
+    @NSManaged var measurements: NSSet?
 
     override func awakeFromInsert() {
         super.awakeFromInsert()
@@ -546,6 +591,17 @@ nonisolated final class BabyEntry: NSManagedObject, Identifiable {
         set { setValue(newValue.map(NSNumber.init(value:)), forKey: "amountML") }
     }
 
+    /// Pumped amount from each side, in millilitres.
+    var leftML: Double? {
+        get { (value(forKey: "leftML") as? NSNumber)?.doubleValue }
+        set { setValue(newValue.map(NSNumber.init(value:)), forKey: "leftML") }
+    }
+
+    var rightML: Double? {
+        get { (value(forKey: "rightML") as? NSNumber)?.doubleValue }
+        set { setValue(newValue.map(NSNumber.init(value:)), forKey: "rightML") }
+    }
+
     /// Body temperature, always stored in Celsius and converted for display.
     var temperatureC: Double? {
         get { (value(forKey: "temperatureC") as? NSNumber)?.doubleValue }
@@ -646,6 +702,14 @@ nonisolated final class BabyEntry: NSManagedObject, Identifiable {
             if let symptom { parts.append(symptom.title) }
             if let temperature = formattedTemperature(in: temperatureUnit) { parts.append(temperature) }
             if let severity { parts.append(severity.title) }
+        case .pump:
+            let total = (leftML ?? 0) + (rightML ?? 0)
+            if total > 0 { parts.append(volumeUnit.format(milliliters: total)) }
+            var sides: [String] = []
+            if let leftML, leftML > 0 { sides.append(String(localized: "L \(volumeUnit.format(milliliters: leftML))")) }
+            if let rightML, rightML > 0 { sides.append(String(localized: "R \(volumeUnit.format(milliliters: rightML))")) }
+            if !sides.isEmpty { parts.append(sides.joined(separator: " / ")) }
+            if let endTime { parts.append(Self.format(endTime.timeIntervalSince(timestamp))) }
         }
         if !notes.isEmpty { parts.append(notes) }
         return parts.joined(separator: " · ")
@@ -734,6 +798,57 @@ nonisolated final class ScheduleItem: NSManagedObject, Identifiable {
         let request = NSFetchRequest<ScheduleItem>(entityName: "ScheduleItem")
         request.predicate = NSPredicate(format: "baby == %@", baby)
         request.sortDescriptors = [NSSortDescriptor(key: "minuteOfDay", ascending: true)]
+        return request
+    }
+}
+
+// MARK: - Growth
+
+/// One growth check: any of weight, length and head size.
+@objc(GrowthMeasurement)
+nonisolated final class GrowthMeasurement: NSManagedObject, Identifiable {
+    @NSManaged var measurementID: UUID?
+    @NSManaged var date: Date?
+    @NSManaged var notes: String
+    @NSManaged var baby: Baby?
+
+    override func awakeFromInsert() {
+        super.awakeFromInsert()
+        measurementID = UUID()
+        date = .now
+        notes = ""
+    }
+
+    /// Creates a measurement in the same (possibly shared) store as the baby.
+    convenience init(context: NSManagedObjectContext, baby: Baby, date: Date) {
+        self.init(context: context)
+        self.date = date
+        self.baby = baby
+        if let store = baby.objectID.persistentStore {
+            context.assign(self, to: store)
+        }
+    }
+
+    // Optional numbers use key-value access because @NSManaged can't expose an optional Double.
+    var weightKg: Double? {
+        get { (value(forKey: "weightKg") as? NSNumber)?.doubleValue }
+        set { setValue(newValue.map(NSNumber.init(value:)), forKey: "weightKg") }
+    }
+
+    var lengthCm: Double? {
+        get { (value(forKey: "lengthCm") as? NSNumber)?.doubleValue }
+        set { setValue(newValue.map(NSNumber.init(value:)), forKey: "lengthCm") }
+    }
+
+    var headCm: Double? {
+        get { (value(forKey: "headCm") as? NSNumber)?.doubleValue }
+        set { setValue(newValue.map(NSNumber.init(value:)), forKey: "headCm") }
+    }
+
+    static func fetch(for baby: Baby) -> NSFetchRequest<GrowthMeasurement> {
+        let request = NSFetchRequest<GrowthMeasurement>(entityName: "GrowthMeasurement")
+        request.predicate = NSPredicate(format: "baby == %@", baby)
+        request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: true)]
         return request
     }
 }

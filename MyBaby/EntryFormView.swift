@@ -19,6 +19,9 @@ struct EntryFormView: View {
     /// Bottle amount in the unit chosen in Settings (ml or oz).
     @State private var amount: Double
     @State private var diaperType: DiaperType
+    /// Pumped amounts per side, in the unit chosen in Settings.
+    @State private var leftAmount: Double
+    @State private var rightAmount: Double
     @State private var sleepLocation: SleepLocation?
     @State private var symptom: Symptom
     @State private var severity: Severity
@@ -55,6 +58,8 @@ struct EntryFormView: View {
         let volumeUnit = VolumeUnitPreference.current
         _amount = State(initialValue: volumeUnit.toDisplay(milliliters: entry?.amountML ?? 90))
         _diaperType = State(initialValue: entry?.diaperType ?? .wet)
+        _leftAmount = State(initialValue: volumeUnit.toDisplay(milliliters: entry?.leftML ?? 0))
+        _rightAmount = State(initialValue: volumeUnit.toDisplay(milliliters: entry?.rightML ?? 0))
         _sleepLocation = State(initialValue: entry?.sleepLocation)
         _symptom = State(initialValue: entry?.symptom ?? .fever)
         _severity = State(initialValue: entry?.severity ?? .mild)
@@ -70,13 +75,16 @@ struct EntryFormView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    Picker("Type", selection: $kind) {
-                        ForEach(EntryKind.allCases) { kind in
-                            Label(kind.title, systemImage: kind.symbol).tag(kind)
+                // Pumping is the parent's own log, so it isn't mixed in with the baby's entry types.
+                if kind != .pump {
+                    Section {
+                        Picker("Type", selection: $kind) {
+                            ForEach([EntryKind.feed, .sleep, .diaper, .health]) { kind in
+                                Label(kind.title, systemImage: kind.symbol).tag(kind)
+                            }
                         }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                 }
 
                 switch kind {
@@ -88,6 +96,8 @@ struct EntryFormView: View {
                     diaperSection
                 case .health:
                     healthSection
+                case .pump:
+                    pumpSection
                 }
 
                 Section("Notes") {
@@ -202,6 +212,27 @@ struct EntryFormView: View {
         }
     }
 
+    private var pumpSection: some View {
+        let unit = VolumeUnitPreference.current
+        return Section {
+            DatePicker("Started", selection: $timestamp)
+            Toggle("Record end time", isOn: $hasEndTime)
+            if hasEndTime {
+                DatePicker("Ended", selection: $endTime, in: timestamp...)
+            }
+            Stepper(value: $leftAmount, in: 0...unit.maximum, step: unit.step) {
+                LabeledContent("Left", value: unit.format(milliliters: unit.toMilliliters(leftAmount)))
+            }
+            Stepper(value: $rightAmount, in: 0...unit.maximum, step: unit.step) {
+                LabeledContent("Right", value: unit.format(milliliters: unit.toMilliliters(rightAmount)))
+            }
+            LabeledContent("Total", value: unit.format(milliliters: unit.toMilliliters(leftAmount + rightAmount)))
+                .font(.headline)
+        } header: {
+            Text("Pumping")
+        }
+    }
+
     private var diaperSection: some View {
         Section("Diaper") {
             Picker("Contents", selection: $diaperType) {
@@ -278,6 +309,8 @@ struct EntryFormView: View {
         target.symptom = nil
         target.severity = nil
         target.temperatureC = nil
+        target.leftML = nil
+        target.rightML = nil
         target.endTime = nil
 
         // A running breastfeeding timer keeps running unless it's given an end time.
@@ -300,6 +333,11 @@ struct EntryFormView: View {
             target.symptom = symptom
             target.severity = severity
             if hasTemperature { target.temperatureC = temperatureInCelsius }
+        case .pump:
+            let unit = VolumeUnitPreference.current
+            target.leftML = leftAmount > 0 ? unit.toMilliliters(leftAmount) : nil
+            target.rightML = rightAmount > 0 ? unit.toMilliliters(rightAmount) : nil
+            target.endTime = hasEndTime ? endTime : nil
         }
 
         try? context.save()

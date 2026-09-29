@@ -13,8 +13,8 @@ import Foundation
 nonisolated final class PersistenceController: @unchecked Sendable {
     // IMPORTANT: When you set your real bundle identifier, update these two values and the
     // matching entries in both targets' entitlements (Signing & Capabilities).
-    static let appGroupID = "group.devplaceholder.AIRZ9E5D.MyBaby"
-    static let cloudKitContainerID = "iCloud.devplaceholder.AIRZ9E5D.MyBaby"
+    static let appGroupID = "group.com.chaniiappsllc.MyBaby"
+    static let cloudKitContainerID = "iCloud.com.chaniiappsllc.MyBaby"
 
     static let shared = PersistenceController()
 
@@ -58,7 +58,37 @@ nonisolated final class PersistenceController: @unchecked Sendable {
         if !inMemory {
             startObservingOtherProcesses()
         }
+
+        #if DEBUG
+        if isCloudKitEnabled {
+            initializeCloudKitSchemaIfNeeded()
+        }
+        #endif
     }
+
+    #if DEBUG
+    /// Development builds only: uploads every record type and field to CloudKit's Development
+    /// environment, once per model change. After it runs, open the CloudKit Console and choose
+    /// "Deploy Schema Changes…" so TestFlight and App Store builds (Production) can sync and share.
+    private func initializeCloudKitSchemaIfNeeded() {
+        let version = BabyDataModel.model.entityVersionHashesByName
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key):\($0.value.base64EncodedString())" }
+            .joined(separator: "|")
+        let key = "cloudKitSchemaVersion"
+        guard UserDefaults.standard.string(forKey: key) != version else { return }
+        let container = container
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try container.initializeCloudKitSchema(options: [])
+                UserDefaults.standard.set(version, forKey: key)
+                print("✅ CloudKit schema uploaded to Development. Now deploy it to Production in the CloudKit Console.")
+            } catch {
+                print("⚠️ CloudKit schema upload failed: \(error)")
+            }
+        }
+    }
+    #endif
 
     // MARK: Setup
 
@@ -166,7 +196,11 @@ nonisolated final class PersistenceController: @unchecked Sendable {
 
     /// The CloudKit share a baby belongs to, if any.
     func existingShare(for object: NSManagedObject) -> CKShare? {
-        (try? container.fetchShares(matching: [object.objectID]))?[object.objectID]
+        existingShare(forObjectWith: object.objectID)
+    }
+
+    func existingShare(forObjectWith id: NSManagedObjectID) -> CKShare? {
+        (try? container.fetchShares(matching: [id]))?[id]
     }
 
     /// True when someone else shared this baby with you.
@@ -185,6 +219,19 @@ nonisolated final class PersistenceController: @unchecked Sendable {
     }
 
     /// Creates a share for a baby and everything logged for them.
+    /// Creates the share for the system share sheet (Messages, Mail, AirDrop, Copy Link…).
+    @MainActor
+    func makeShare(forObjectWith id: NSManagedObjectID, title: String) async throws -> CKShare {
+        let object = try viewContext.existingObject(with: id)
+        let (_, share, _) = try await container.share([object], to: nil)
+        share[CKShare.SystemFieldKey.title] = title as CKRecordValue
+        // Finish saving the title before Messages sends the link, so the invite is complete.
+        if let privateStore {
+            _ = try? await container.persistUpdatedShare(share, in: privateStore)
+        }
+        return share
+    }
+
     func makeShare(for baby: Baby) async throws -> (CKShare, CKContainer) {
         let (_, share, ckContainer) = try await container.share([baby], to: nil)
         share[CKShare.SystemFieldKey.title] = "\(baby.displayName)'s Baby Log" as CKRecordValue
@@ -193,8 +240,28 @@ nonisolated final class PersistenceController: @unchecked Sendable {
 
     /// Saves changes the system sharing UI made to a share.
     func persistUpdatedShare(_ share: CKShare) {
-        guard let store = privateStore else { return }
+        let isOwner = share.currentUserParticipant == share.owner
+        guard let store = isOwner ? privateStore : sharedStore else { return }
         container.persistUpdatedShare(share, in: store, completion: nil)
+    }
+
+    /// Deletes a baby and everything logged for them.
+    ///
+    /// - Your own baby: deleted here, on your other devices and, if shared, for everyone on the share.
+    /// - A baby someone shared with you: only removed from your devices. Their log stays intact.
+    @MainActor
+    func delete(_ baby: Baby) async {
+        let share = existingShare(for: baby)
+        if isFromSomeoneElse(baby) {
+            if let share { removeSharedData(for: share) }
+            return
+        }
+        viewContext.delete(baby)   // Entries, measurements and schedule go with it (cascade).
+        save()
+        // Also remove the share and its iCloud zone so invited people lose access.
+        if let share, let privateStore {
+            container.purgeObjectsAndRecordsInZone(with: share.recordID.zoneID, in: privateStore, completion: nil)
+        }
     }
 
     /// Accepts an invitation someone sent, adding their baby to the shared store.

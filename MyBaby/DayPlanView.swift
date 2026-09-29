@@ -41,17 +41,22 @@ struct WhatsNextCard: View {
             }
 
             TimelineView(.everyMinute) { context in
-                let predictor = SchedulePredictor(entries: entries, schedule: Array(schedule),
-                                                  age: BabyAge(birthdayInterval: baby.birthdayInterval), now: context.date)
-                let upcoming = predictor.plan().items.filter { !$0.isDone }.prefix(3)
-                if upcoming.isEmpty {
-                    Text("Log a few more feeds and naps, and predictions will appear here.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else {
-                    VStack(spacing: 4) {
-                        ForEach(Array(upcoming)) { item in
-                            PlanRow(item: item, now: context.date, isCompact: true) { onTap(item.kind) }
+                let age = BabyAge(birthdayInterval: baby.birthdayInterval)
+                let predictor = SchedulePredictor(entries: entries, schedule: Array(schedule), age: age, now: context.date)
+                let upcoming = predictor.plan().items.filter { !$0.isDone }
+                // One row per schedule: feeding, sleep and diapers, each with what's next and what follows.
+                VStack(spacing: 0) {
+                    ForEach([EntryKind.feed, .sleep, .diaper]) { kind in
+                        let items = upcoming.filter { $0.kind == kind }
+                        ScheduleLane(
+                            kind: kind,
+                            label: TileStage.forKind(kind, age: age).label,
+                            next: items.first,
+                            then: items.dropFirst().first,
+                            now: context.date
+                        ) { onTap(kind) }
+                        if kind != .diaper {
+                            Divider().padding(.leading, 58)
                         }
                     }
                 }
@@ -92,6 +97,95 @@ struct WhatsNextCard: View {
         if sleep > 0 { parts.append("\(BabyEntry.format(sleep)) sleep") }
         if diapers > 0 { parts.append(diapers == 1 ? "1 diaper" : "\(diapers) diapers") }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// One of the three schedules on Today: the next feed, sleep or diaper change, and the one after.
+private struct ScheduleLane: View {
+    let kind: EntryKind
+    let label: String
+    let next: PlannedItem?
+    let then: PlannedItem?
+    let now: Date
+    let action: () -> Void
+
+    private var isDue: Bool {
+        guard let next else { return false }
+        return next.isRunning || next.time.timeIntervalSince(now) < 10 * 60
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: kind.symbol)
+                    .font(.headline)
+                    .foregroundStyle(kind.textColor)
+                    .frame(width: 44, height: 44)
+                    .background(kind.softColor, in: .rect(cornerRadius: 14, style: .continuous))
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(label)
+                            .font(.subheadline.weight(.semibold))
+                        if next?.source == .schedule {
+                            Text("Plan")
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .foregroundStyle(kind.textColor)
+                                .background(kind.softColor, in: .capsule)
+                        }
+                    }
+                    if let next {
+                        Text(status(for: next))
+                            .font(.caption)
+                            .foregroundStyle(isDue ? kind.textColor : .secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("Log one to see the schedule")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                if let next {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(next.isRunning ? "Now" : next.time.formatted(date: .omitted, time: .shortened))
+                            .font(.subheadline.weight(.bold).monospacedDigit())
+                            .foregroundStyle(isDue ? kind.textColor : .primary)
+                        if let then {
+                            Text("then \(then.time.formatted(date: .omitted, time: .shortened))")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 8)
+            .contentShape(.rect)
+        }
+        .buttonStyle(SquishButtonStyle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityText)
+        .accessibilityHint("Opens quick options to log")
+    }
+
+    /// "Next feed · in 40m", "Bedtime · due now", "Asleep · likely waking in 20m".
+    private func status(for item: PlannedItem) -> String {
+        if item.isRunning {
+            return item.kind == .sleep ? "Asleep · likely waking \(WhatsNextPlanner.dueText(for: item.time, now: now))" : item.title
+        }
+        return "\(item.title) · \(WhatsNextPlanner.dueText(for: item.time, now: now))"
+    }
+
+    private var accessibilityText: String {
+        guard let next else { return "\(label): nothing scheduled yet" }
+        var text = "\(label): \(status(for: next)), \(next.time.formatted(date: .omitted, time: .shortened))"
+        if let then { text += ", then \(then.time.formatted(date: .omitted, time: .shortened))" }
+        return text
     }
 }
 
@@ -300,6 +394,9 @@ private struct PatternRows: View {
         }
         if let sleep = summary.sleepPerDay {
             LabeledContent("Sleep per day", value: BabyEntry.format(sleep))
+        }
+        if let gap = summary.diaperGap {
+            LabeledContent("Diaper changes", value: "every \(BabyEntry.format(gap))")
         }
     }
 }
@@ -625,6 +722,15 @@ enum ScheduleReminders {
             let stale = pending.map(\.identifier).filter { $0.hasPrefix(prefix) }
             center.removePendingNotificationRequests(withIdentifiers: stale)
             for request in requests { center.add(request) }
+        }
+    }
+
+    /// Cancels every schedule reminder for a baby that's being deleted.
+    static func removeAll(for baby: Baby) {
+        let center = UNUserNotificationCenter.current()
+        let prefix = prefix(for: baby)
+        center.getPendingNotificationRequests { pending in
+            center.removePendingNotificationRequests(withIdentifiers: pending.map(\.identifier).filter { $0.hasPrefix(prefix) })
         }
     }
 }
